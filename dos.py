@@ -1,8 +1,4 @@
 #!/usr/bin/env python3
-"""
-HYBRID DDOS - Python Version
-Combines Go performance structure with Node.js HTTP/2 techniques
-"""
 
 import asyncio
 import aiohttp
